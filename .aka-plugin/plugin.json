@@ -1,0 +1,10 @@
+{
+  "name": "setup_helper",
+  "version": "0.1.0",
+  "description": "Akashic setup helper plugin",
+  "akashic": {
+    "lifecycle": {
+      "entry": "plugin.py"
+    }
+  }
+}
