@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import cast
+
+from pydantic import BaseModel
 
 from agent.lifecycle.types import BeforeTurnCtx, TurnState
 from agent.plugins import Plugin
+
+
+class SetupHelperConfig(BaseModel):
+    qqbot_data_dir: str = ""
 
 
 class ChatIdCommandModule:
     slot = "setup_helper.chatid"
     requires = ("before_turn.acquire_session", "session:session")
     produces = ("session:ctx",)
+
+    def __init__(self, qqbot_config_path: Path | None) -> None:
+        self._qqbot_config_path = qqbot_config_path
 
     async def run(self, frame: object) -> object:
         if "session:ctx" in frame.slots:  # type: ignore[attr-defined]
@@ -18,7 +29,11 @@ class ChatIdCommandModule:
         if _normalize_command(state.msg.content) not in {"/chatid", "/myid"}:
             return frame
         chat_id = state.msg.chat_id or "（未知）"
-        reply = _format_reply(chat_id, channel=state.msg.channel)
+        reply = _format_reply(
+            chat_id,
+            channel=state.msg.channel,
+            qqbot_config_path=self._qqbot_config_path,
+        )
         frame.slots["session:ctx"] = _abort_ctx(state, reply)  # type: ignore[attr-defined]
         return frame
 
@@ -27,12 +42,15 @@ class SetupHelper(Plugin):
     name = "setup_helper"
     version = "1.0.0"
     desc = "快速查询当前会话 chat_id，用于配置 proactive"
+    ConfigModel = SetupHelperConfig
 
     def telegram_bot_commands(self) -> list[tuple[str, str]]:
         return [("chatid", "查看我的 chat_id（配置 proactive 用）")]
 
     def before_turn_modules(self) -> list[object]:
-        return cast("list[object]", [ChatIdCommandModule()])
+        config = cast(SetupHelperConfig, self.context.config)
+        qqbot_config_path = _qqbot_config_path(config)
+        return cast("list[object]", [ChatIdCommandModule(qqbot_config_path)])
 
 
 def _normalize_command(content: str) -> str:
@@ -45,7 +63,11 @@ def _normalize_command(content: str) -> str:
     return head
 
 
-def _format_reply(chat_id: str, channel: str = "telegram") -> str:
+def _format_reply(
+    chat_id: str,
+    channel: str = "telegram",
+    qqbot_config_path: Path | None = None,
+) -> str:
     lines = [
         f"你的 chat_id 是：`{chat_id}`",
         "",
@@ -68,11 +90,24 @@ def _format_reply(chat_id: str, channel: str = "telegram") -> str:
             "同时确认 allow_from 已包含你的 user_openid：",
             "",
             "```toml",
-            "~/.akashic-plugin/data/qqbot-github/config.local.toml",
+            (
+                str(qqbot_config_path)
+                if qqbot_config_path is not None
+                else "请先设置 QQBOT_DATA_DIR，或在 setup_helper 插件配置中填写 qqbot_data_dir"
+            ),
             f'allow_from = ["{raw_openid}"]',
             "```",
         ]
     return "\n".join(lines)
+
+
+def _qqbot_config_path(config: SetupHelperConfig) -> Path | None:
+    raw = os.environ.get("QQBOT_DATA_DIR", "").strip()
+    if not raw:
+        raw = config.qqbot_data_dir.strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser() / "config.local.toml"
 
 
 def _abort_ctx(state: TurnState, reply: str) -> BeforeTurnCtx:
