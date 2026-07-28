@@ -39,6 +39,7 @@ class ChatIdCommandModule:
 
 
 class SetupHelper(Plugin):
+    api_version = 2
     name = "setup_helper"
     version = "1.0.0"
     desc = "快速查询当前会话 chat_id，用于配置 proactive"
