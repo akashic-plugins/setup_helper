@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import shutil
-from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -17,14 +16,6 @@ from agent.core.passive_turn import (
     PassiveTurnPipeline,
     Reasoner,
 )
-from agent.core.types import ContextBundle
-from agent.lifecycle.phase import Phase
-from agent.lifecycle.phases.before_turn import (
-    BeforeTurnFrame,
-    BeforeTurnModules,
-    default_before_turn_modules,
-)
-from agent.lifecycle.types import TurnState
 from agent.looping.ports import SessionServices
 from agent.plugin_composition import (
     COMMANDS,
@@ -42,35 +33,14 @@ from agent.turns.outbound import OutboundPort
 from bus.event_bus import EventBus
 from bus.events import InboundMessage, TurnDisposition
 from plugin import (
-    ChatIdCommandModule,
     SetupHelperConfig,
     apply,
     inject,
     _format_reply,
     _qqbot_config_path,
 )
-from session.manager import SessionManager
 
 PLUGIN_ROOT = Path(__file__).parents[1]
-
-
-@pytest.mark.asyncio
-async def test_chatid_command_aborts_turn() -> None:
-    state = SimpleNamespace(
-        session_key="telegram:1",
-        msg=SimpleNamespace(
-            content="/chatid",
-            channel="telegram",
-            chat_id="123",
-            timestamp=datetime.now(),
-        ),
-    )
-    frame = SimpleNamespace(input=state, slots={"session:session": object()})
-    module = ChatIdCommandModule(Path("/plugin-data/qqbot-custom/config.local.toml"))
-    await module.run(frame)
-    ctx = frame.slots["session:ctx"]
-    assert ctx.abort is True
-    assert "123" in ctx.abort_reply
 
 
 def test_qqbot_reply_contains_allow_from_hint() -> None:
@@ -122,7 +92,7 @@ def test_missing_qqbot_data_dir_does_not_guess_marketplace(
         ("/unknown", "telegram", "123"),
     ],
 )
-async def test_v3_command_matches_v2_short_circuit(
+async def test_v3_command_preserves_published_reply(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     content: str,
@@ -132,26 +102,6 @@ async def test_v3_command_matches_v2_short_circuit(
     monkeypatch.delenv("QQBOT_DATA_DIR", raising=False)
     config = SetupHelperConfig(qqbot_data_dir=str(tmp_path / "qqbot"))
     config_path = _qqbot_config_path(config)
-
-    legacy_state = SimpleNamespace(
-        session_key=f"{channel}:{chat_id}",
-        msg=SimpleNamespace(
-            content=content,
-            channel=channel,
-            chat_id=chat_id,
-            timestamp=datetime.now(),
-        ),
-    )
-    legacy_frame = SimpleNamespace(
-        input=legacy_state,
-        slots={"session:session": object()},
-    )
-    await ChatIdCommandModule(config_path).run(legacy_frame)
-    legacy_reply = (
-        legacy_frame.slots["session:ctx"].abort_reply
-        if "session:ctx" in legacy_frame.slots
-        else None
-    )
 
     _ = ComposablePlugin.from_module(plugin_module)
     root = CompositionRoot("setup-helper-parity")
@@ -183,7 +133,16 @@ async def test_v3_command_matches_v2_short_circuit(
     )
     candidate_reply = execution.result.text if execution is not None else None
 
-    assert candidate_reply == legacy_reply
+    expected = (
+        None
+        if content == "/unknown"
+        else _format_reply(
+            chat_id or "（未知）",
+            channel=channel,
+            qqbot_config_path=config_path,
+        )
+    )
+    assert candidate_reply == expected
     assert registry.descriptors == (
         CommandDescriptor(
             name="chatid",
@@ -197,52 +156,6 @@ async def test_v3_command_matches_v2_short_circuit(
 
     assert root.receipt().services == ()
     assert root.receipt().effects == ()
-
-
-@pytest.mark.asyncio
-async def test_v2_command_created_empty_session_metadata_before_short_circuit(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Pin the legacy incidental Session write that v3 intentionally removes."""
-
-    # 1. Run the legacy module in its real BeforeTurn ordering.
-    monkeypatch.delenv("QQBOT_DATA_DIR", raising=False)
-    workspace = tmp_path / "legacy-workspace"
-    session_manager = SessionManager(workspace)
-    context_store = SimpleNamespace(
-        prepare=AsyncMock(return_value=ContextBundle()),
-    )
-    phase = Phase(
-        default_before_turn_modules(
-            EventBus(),
-            session_manager,
-            cast(ContextStore, cast(object, context_store)),
-            plugin_modules=cast(
-                BeforeTurnModules,
-                cast(object, [ChatIdCommandModule(None)]),
-            ),
-        ),
-        frame_factory=BeforeTurnFrame,
-    )
-    state = TurnState(
-        msg=InboundMessage(
-            channel="telegram",
-            sender="hua",
-            chat_id="new-chat",
-            content="/chatid",
-        ),
-        session_key="telegram:new-chat",
-        dispatch_outbound=True,
-    )
-
-    result = await phase.run(state)
-
-    # 2. A new manager can reopen the empty durable Session; Context stayed skipped.
-    reopened = SessionManager(workspace).get_existing("telegram:new-chat")
-    assert result.abort is True
-    assert reopened.messages == []
-    context_store.prepare.assert_not_awaited()
 
 
 @pytest.mark.asyncio
