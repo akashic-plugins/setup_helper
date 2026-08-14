@@ -17,6 +17,14 @@ from agent.core.passive_turn import (
     PassiveTurnPipeline,
     Reasoner,
 )
+from agent.core.types import ContextBundle
+from agent.lifecycle.phase import Phase
+from agent.lifecycle.phases.before_turn import (
+    BeforeTurnFrame,
+    BeforeTurnModules,
+    default_before_turn_modules,
+)
+from agent.lifecycle.types import TurnState
 from agent.looping.ports import SessionServices
 from agent.plugin_composition import (
     COMMANDS,
@@ -41,6 +49,7 @@ from plugin import (
     _format_reply,
     _qqbot_config_path,
 )
+from session.manager import SessionManager
 
 PLUGIN_ROOT = Path(__file__).parents[1]
 
@@ -188,6 +197,52 @@ async def test_v3_command_matches_v2_short_circuit(
 
     assert root.receipt().services == ()
     assert root.receipt().effects == ()
+
+
+@pytest.mark.asyncio
+async def test_v2_command_created_empty_session_metadata_before_short_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pin the legacy incidental Session write that v3 intentionally removes."""
+
+    # 1. Run the legacy module in its real BeforeTurn ordering.
+    monkeypatch.delenv("QQBOT_DATA_DIR", raising=False)
+    workspace = tmp_path / "legacy-workspace"
+    session_manager = SessionManager(workspace)
+    context_store = SimpleNamespace(
+        prepare=AsyncMock(return_value=ContextBundle()),
+    )
+    phase = Phase(
+        default_before_turn_modules(
+            EventBus(),
+            session_manager,
+            cast(ContextStore, cast(object, context_store)),
+            plugin_modules=cast(
+                BeforeTurnModules,
+                cast(object, [ChatIdCommandModule(None)]),
+            ),
+        ),
+        frame_factory=BeforeTurnFrame,
+    )
+    state = TurnState(
+        msg=InboundMessage(
+            channel="telegram",
+            sender="hua",
+            chat_id="new-chat",
+            content="/chatid",
+        ),
+        session_key="telegram:new-chat",
+        dispatch_outbound=True,
+    )
+
+    result = await phase.run(state)
+
+    # 2. A new manager can reopen the empty durable Session; Context stayed skipped.
+    reopened = SessionManager(workspace).get_existing("telegram:new-chat")
+    assert result.abort is True
+    assert reopened.messages == []
+    context_store.prepare.assert_not_awaited()
 
 
 @pytest.mark.asyncio
