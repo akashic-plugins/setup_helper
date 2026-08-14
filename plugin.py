@@ -2,16 +2,65 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 from pydantic import BaseModel
 
 from agent.lifecycle.types import BeforeTurnCtx, TurnState
+from agent.plugin_composition import (
+    COMMANDS,
+    CommandDefinition,
+    CommandInvocation,
+    CommandResult,
+    Context,
+)
 from agent.plugins import Plugin
 
 
 class SetupHelperConfig(BaseModel):
     qqbot_data_dir: str = ""
+
+
+api_version = 3
+name = "setup_helper"
+version = "1.0.0"
+desc = "快速查询当前会话 chat_id，用于配置 proactive"
+Config = SetupHelperConfig
+inject = (COMMANDS,)
+
+
+class _BeforeTurnFrame(Protocol):
+    input: TurnState
+    slots: dict[str, object]
+
+
+async def apply(ctx: Context, config: SetupHelperConfig) -> None:
+    """Register the chat identity command against the Core command seam."""
+
+    # 1. Resolve plugin-owned presentation configuration once per generation.
+    qqbot_config_path = _qqbot_config_path(config)
+
+    # 2. Core owns admission; this plugin owns the command behavior and text.
+    async def handle(invocation: CommandInvocation) -> CommandResult:
+        chat_id = invocation.chat_id or "（未知）"
+        return CommandResult(
+            "success",
+            _format_reply(
+                chat_id,
+                channel=invocation.channel,
+                qqbot_config_path=qqbot_config_path,
+            ),
+        )
+
+    await ctx.require(COMMANDS).register(
+        ctx,
+        CommandDefinition(
+            name="chatid",
+            description="查看我的 chat_id（配置 proactive 用）",
+            aliases=("myid",),
+            handler=handle,
+        ),
+    )
 
 
 class ChatIdCommandModule:
@@ -23,9 +72,10 @@ class ChatIdCommandModule:
         self._qqbot_config_path = qqbot_config_path
 
     async def run(self, frame: object) -> object:
-        if "session:ctx" in frame.slots:  # type: ignore[attr-defined]
+        typed_frame = cast(_BeforeTurnFrame, frame)
+        if "session:ctx" in typed_frame.slots:
             return frame
-        state: TurnState = frame.input  # type: ignore[attr-defined]
+        state = typed_frame.input
         if _normalize_command(state.msg.content) not in {"/chatid", "/myid"}:
             return frame
         chat_id = state.msg.chat_id or "（未知）"
@@ -34,7 +84,7 @@ class ChatIdCommandModule:
             channel=state.msg.channel,
             qqbot_config_path=self._qqbot_config_path,
         )
-        frame.slots["session:ctx"] = _abort_ctx(state, reply)  # type: ignore[attr-defined]
+        typed_frame.slots["session:ctx"] = _abort_ctx(state, reply)
         return frame
 
 
