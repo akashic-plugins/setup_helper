@@ -1,0 +1,11 @@
+{
+  "include": ["plugin.py", "tests"],
+  "exclude": ["**/__pycache__"],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "pythonVersion": "3.13",
+      "extraPaths": [".akashic-core"]
+    }
+  ]
+}

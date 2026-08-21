@@ -2,66 +2,56 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import cast
 
 from pydantic import BaseModel
 
-from agent.lifecycle.types import BeforeTurnCtx, TurnState
-from agent.plugins import Plugin
+from agent.plugin_composition import (
+    COMMANDS,
+    CommandDefinition,
+    CommandInvocation,
+    CommandResult,
+    Context,
+)
 
 
-class SetupHelperConfig(BaseModel):
+api_version = 3
+name = "setup_helper"
+version = "2.0.0"
+desc = "快速查询当前会话 chat_id，用于配置 proactive"
+inject = (COMMANDS,)
+
+
+class Config(BaseModel):
     qqbot_data_dir: str = ""
 
 
-class ChatIdCommandModule:
-    slot = "setup_helper.chatid"
-    requires = ("before_turn.acquire_session", "session:session")
-    produces = ("session:ctx",)
+async def apply(ctx: Context, config: Config) -> None:
+    """登记查询当前渠道身份的 slash command。"""
 
-    def __init__(self, qqbot_config_path: Path | None) -> None:
-        self._qqbot_config_path = qqbot_config_path
+    # 1. 配置只决定 QQBot 提示中的目标路径，不持有渠道或 Session。
+    qqbot_config_path = _qqbot_config_path(config)
 
-    async def run(self, frame: object) -> object:
-        if "session:ctx" in frame.slots:  # type: ignore[attr-defined]
-            return frame
-        state: TurnState = frame.input  # type: ignore[attr-defined]
-        if _normalize_command(state.msg.content) not in {"/chatid", "/myid"}:
-            return frame
-        chat_id = state.msg.chat_id or "（未知）"
-        reply = _format_reply(
-            chat_id,
-            channel=state.msg.channel,
-            qqbot_config_path=self._qqbot_config_path,
+    async def handle_chat_id(invocation: CommandInvocation) -> CommandResult:
+        chat_id = invocation.chat_id or "（未知）"
+        return CommandResult(
+            "success",
+            _format_reply(
+                chat_id,
+                channel=invocation.channel,
+                qqbot_config_path=qqbot_config_path,
+            ),
         )
-        frame.slots["session:ctx"] = _abort_ctx(state, reply)  # type: ignore[attr-defined]
-        return frame
 
-
-class SetupHelper(Plugin):
-    api_version = 2
-    name = "setup_helper"
-    version = "1.0.0"
-    desc = "快速查询当前会话 chat_id，用于配置 proactive"
-    ConfigModel = SetupHelperConfig
-
-    def telegram_bot_commands(self) -> list[tuple[str, str]]:
-        return [("chatid", "查看我的 chat_id（配置 proactive 用）")]
-
-    def before_turn_modules(self) -> list[object]:
-        config = cast(SetupHelperConfig, self.context.config)
-        qqbot_config_path = _qqbot_config_path(config)
-        return cast("list[object]", [ChatIdCommandModule(qqbot_config_path)])
-
-
-def _normalize_command(content: str) -> str:
-    parts = (content or "").strip().split(maxsplit=1)
-    if not parts:
-        return ""
-    head = parts[0].lower()
-    if "@" in head:
-        head = head.split("@", 1)[0]
-    return head
+    # 2. Command Registry 统一拥有描述、别名、执行和 generation cleanup。
+    await ctx.require(COMMANDS).register(
+        ctx,
+        CommandDefinition(
+            name="chatid",
+            description="查看我的 chat_id（配置 proactive 用）",
+            aliases=("myid",),
+            handler=handle_chat_id,
+        ),
+    )
 
 
 def _format_reply(
@@ -102,26 +92,10 @@ def _format_reply(
     return "\n".join(lines)
 
 
-def _qqbot_config_path(config: SetupHelperConfig) -> Path | None:
+def _qqbot_config_path(config: Config) -> Path | None:
     raw = os.environ.get("QQBOT_DATA_DIR", "").strip()
     if not raw:
         raw = config.qqbot_data_dir.strip()
     if not raw:
         return None
     return Path(raw).expanduser() / "config.local.toml"
-
-
-def _abort_ctx(state: TurnState, reply: str) -> BeforeTurnCtx:
-    return BeforeTurnCtx(
-        session_key=state.session_key,
-        channel=state.msg.channel,
-        chat_id=state.msg.chat_id,
-        content=state.msg.content,
-        timestamp=state.msg.timestamp,
-        skill_names=[],
-        retrieved_memory_block="",
-        retrieval_trace_raw=None,
-        history_messages=(),
-        abort=True,
-        abort_reply=reply,
-    )
