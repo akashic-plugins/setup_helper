@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -13,11 +14,10 @@ from agent.plugin_composition import (
     Context,
 )
 
-
 api_version = 3
 name = "setup_helper"
-version = "2.0.0"
-desc = "快速查询当前会话 chat_id，用于配置 proactive"
+version = "3.0.0"
+desc = "快速查询当前会话 chat_id，用于配置 Wake 送达"
 inject = (COMMANDS,)
 
 
@@ -38,6 +38,7 @@ async def apply(ctx: Context, config: Config) -> None:
             _format_reply(
                 chat_id,
                 channel=invocation.channel,
+                session_id=invocation.session_key,
                 qqbot_config_path=qqbot_config_path,
             ),
         )
@@ -47,7 +48,7 @@ async def apply(ctx: Context, config: Config) -> None:
         ctx,
         CommandDefinition(
             name="chatid",
-            description="查看我的 chat_id（配置 proactive 用）",
+            description="查看我的 chat_id（配置 Wake 送达用）",
             aliases=("myid",),
             handler=handle_chat_id,
         ),
@@ -58,19 +59,19 @@ def _format_reply(
     chat_id: str,
     channel: str = "telegram",
     qqbot_config_path: Path | None = None,
+    *,
+    session_id: str,
 ) -> str:
     lines = [
         f"你的 chat_id 是：`{chat_id}`",
         "",
-        "将它填入 config.toml 即可开启主动推送：",
+        "在 <workspace>/plugin-data/wake-builtin/config.local.toml 中设置主动消息的送达目标：",
         "",
         "```toml",
-        "[proactive]",
-        "enabled = true",
-        "",
-        "[proactive.target]",
-        f'channel = "{channel}"',
-        f'chat_id = "{chat_id}"',
+        "[delivery]",
+        f"channel = {json.dumps(channel, ensure_ascii=False)}",
+        f"recipient = {json.dumps(chat_id, ensure_ascii=False)}",
+        f"session_id = {json.dumps(session_id, ensure_ascii=False)}",
         "```",
     ]
     if channel == "qqbot":
@@ -86,7 +87,7 @@ def _format_reply(
                 if qqbot_config_path is not None
                 else "请先设置 QQBOT_DATA_DIR，或在 setup_helper 插件配置中填写 qqbot_data_dir"
             ),
-            f'allow_from = ["{raw_openid}"]',
+            f"allow_from = [{json.dumps(raw_openid, ensure_ascii=False)}]",
             "```",
         ]
     return "\n".join(lines)
