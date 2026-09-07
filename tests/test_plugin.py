@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ async def test_v3_apply_registers_chatid_command(tmp_path: Path) -> None:
         inject=plugin_module.inject,
         runtime=PluginRuntime(
             plugin_id="setup_helper",
+            generation_id="test-generation",
             plugin_dir=Path(plugin_module.__file__).resolve().parent,
             data_dir=tmp_path / "plugin-data",
             workspace=tmp_path / "workspace",
@@ -59,7 +61,7 @@ async def test_v3_apply_registers_chatid_command(tmp_path: Path) -> None:
     assert execution is not None
     assert execution.result == CommandResult(
         "success",
-        _format_reply("123"),
+        _format_reply("123", session_id="telegram:123"),
     )
     await root.dispose()
     assert root.receipt().effects == ()
@@ -70,8 +72,8 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
     tmp_path: Path,
 ) -> None:
     plugin_base = tmp_path / "home" / "cache" / "lab" / "setup_helper"
-    stable_root = plugin_base / ".artifacts" / "2.0.0-stable"
-    latest_root = plugin_base / ".artifacts" / "2.0.1-latest"
+    stable_root = plugin_base / ".artifacts" / "3.0.0-stable"
+    latest_root = plugin_base / ".artifacts" / "3.0.1-latest"
     stable_root.mkdir(parents=True)
     latest_root.mkdir(parents=True)
     source = Path(plugin_module.__file__).resolve()
@@ -80,21 +82,25 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
         shutil.copy2(source, artifact / "plugin.py")
         shutil.copy2(manifest_source, artifact / "akashic.plugin.toml")
     (latest_root / "plugin.py").write_text(
-        (latest_root / "plugin.py").read_text(encoding="utf-8").replace(
-            'version = "2.0.0"',
-            'version = "2.0.1"',
+        (latest_root / "plugin.py")
+        .read_text(encoding="utf-8")
+        .replace(
+            'version = "3.0.0"',
+            'version = "3.0.1"',
         ),
         encoding="utf-8",
     )
     (latest_root / "akashic.plugin.toml").write_text(
-        (latest_root / "akashic.plugin.toml").read_text(encoding="utf-8").replace(
-            'version = "2.0.0"',
-            'version = "2.0.1"',
+        (latest_root / "akashic.plugin.toml")
+        .read_text(encoding="utf-8")
+        .replace(
+            'version = "3.0.0"',
+            'version = "3.0.1"',
         ),
         encoding="utf-8",
     )
-    stable_pointer = ArtifactPointer(".artifacts/2.0.0-stable")
-    latest_pointer = ArtifactPointer(".artifacts/2.0.1-latest")
+    stable_pointer = ArtifactPointer(".artifacts/3.0.0-stable")
+    latest_pointer = ArtifactPointer(".artifacts/3.0.1-latest")
     write_pointers(plugin_base, stable=stable_pointer, latest=stable_pointer)
     write_plugin_manifest(
         {"setup_helper@lab": True},
@@ -141,6 +147,16 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
     )
     assert second is not None
     assert 'allow_from = ["new"]' in second.result.text
+    from plugins.wake.api import Config as WakeConfig
+
+    snippet = second.result.text.split("```toml\n", 1)[1].split("```", 1)[0]
+    delivery = WakeConfig.model_validate(tomllib.loads(snippet)).delivery
+    assert delivery is not None
+    assert (delivery.channel, delivery.recipient, delivery.session_id) == (
+        "qqbot",
+        "c2c:new",
+        "qqbot:new",
+    )
     assert not validation_root.exists()
     formal_root = current.composition_root
     await manager.terminate_all()
@@ -150,7 +166,12 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
 
 def test_qqbot_reply_contains_allow_from_hint() -> None:
     config_path = Path("/plugin-data/qqbot-custom/config.local.toml")
-    reply = _format_reply("c2c:abc", channel="qqbot", qqbot_config_path=config_path)
+    reply = _format_reply(
+        "c2c:abc",
+        channel="qqbot",
+        qqbot_config_path=config_path,
+        session_id="qqbot:abc",
+    )
     assert 'allow_from = ["abc"]' in reply
     assert str(config_path) in reply
 
@@ -181,6 +202,8 @@ def test_missing_qqbot_data_dir_does_not_guess_marketplace(
     monkeypatch.setenv("QQBOT_DATA_DIR", "   ")
     config = Config(qqbot_data_dir="   ")
     assert _qqbot_config_path(config) is None
-    reply = _format_reply("c2c:abc", channel="qqbot", qqbot_config_path=None)
+    reply = _format_reply(
+        "c2c:abc", channel="qqbot", qqbot_config_path=None, session_id="qqbot:abc"
+    )
     assert "QQBOT_DATA_DIR" in reply
     assert "qqbot-github" not in reply
