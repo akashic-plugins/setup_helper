@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tomllib
 from pathlib import Path
@@ -10,13 +11,16 @@ from agent.plugin_composition import (
     CommandResult,
     CompositionRoot,
     Context,
-    PluginCommands,
     PluginRuntime,
 )
+from plugins.commands.registry import PluginCommands
 from agent.plugins.manager import PluginManager
+from agent.plugins.selection import PluginSelection
 from agent.plugins.artifacts import ArtifactPointer, write_pointers
 from agent.plugins.manifest import write_plugin_manifest
 from bus.event_bus import EventBus
+
+AGENT_ROOT = Path(os.environ["AKASHIC_AGENT_ROOT"])
 
 import plugin as plugin_module
 from plugin import (
@@ -29,11 +33,11 @@ from plugin import (
 @pytest.mark.asyncio
 async def test_v3_apply_registers_chatid_command(tmp_path: Path) -> None:
     root = CompositionRoot("setup-helper-v3")
-    commands = PluginCommands()
+    commands = PluginCommands(root.context)
     _ = await root.context.provide(COMMANDS, commands)
 
     async def mount_plugin(ctx: Context) -> None:
-        await plugin_module.apply(ctx, Config())
+        await plugin_module.apply(ctx)
 
     _ = await root.mount(
         mount_plugin,
@@ -45,7 +49,7 @@ async def test_v3_apply_registers_chatid_command(tmp_path: Path) -> None:
             plugin_dir=Path(plugin_module.__file__).resolve().parent,
             data_dir=tmp_path / "plugin-data",
             workspace=tmp_path / "workspace",
-            config=Config(),
+            config=dict(Config().model_dump()),
         ),
     )
     registry = commands.freeze()
@@ -77,21 +81,10 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
     stable_root.mkdir(parents=True)
     latest_root.mkdir(parents=True)
     source = Path(plugin_module.__file__).resolve()
-    manifest_source = source.with_name("akashic.plugin.toml")
     for artifact in (stable_root, latest_root):
         shutil.copy2(source, artifact / "plugin.py")
-        shutil.copy2(manifest_source, artifact / "akashic.plugin.toml")
     (latest_root / "plugin.py").write_text(
         (latest_root / "plugin.py")
-        .read_text(encoding="utf-8")
-        .replace(
-            'version = "3.0.0"',
-            'version = "3.0.1"',
-        ),
-        encoding="utf-8",
-    )
-    (latest_root / "akashic.plugin.toml").write_text(
-        (latest_root / "akashic.plugin.toml")
         .read_text(encoding="utf-8")
         .replace(
             'version = "3.0.0"',
@@ -107,17 +100,25 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
         plugins_home=tmp_path / "home",
     )
     manager = PluginManager(
-        plugin_dirs=[],
+        plugin_dirs=[AGENT_ROOT / "plugins" / "commands"],
         event_bus=EventBus(),
-        tool_registry=None,
         workspace=tmp_path / "workspace",
         installed_cache_root=tmp_path / "home" / "cache",
     )
+    PluginSelection(tmp_path / "workspace").initialize()
 
+    async def _switch_endpoints(
+        old: tuple[tuple[str, str], ...],
+        new: tuple[tuple[str, str], ...],
+    ) -> None:
+        _ = (old, new)
+
+    manager.bind_endpoint_switcher(_switch_endpoints)
     await manager.load_all()
     stable = manager.current_snapshot
-    assert stable is not None and stable.command_registry is not None
-    first = await stable.command_registry.execute(
+    assert stable is not None and stable.composition_root is not None
+    stable_commands = stable.composition_root.context.require(COMMANDS).freeze()
+    first = await stable_commands.execute(
         "/chatid",
         session_key="telegram:stable",
         channel="telegram",
@@ -136,9 +137,10 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
 
     assert result["publication_state"] == "promoted"
     current = manager.current_snapshot
-    assert current is not None and current.command_registry is not None
-    assert current.composition_root is not None
-    second = await current.command_registry.execute(
+    assert current is not None and current.composition_root is not None
+    second = await current.composition_root.context.require(
+        COMMANDS
+    ).freeze().execute(
         "/myid",
         session_key="qqbot:new",
         channel="qqbot",
@@ -157,7 +159,8 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
         "c2c:new",
         "qqbot:new",
     )
-    assert not validation_root.exists()
+    # 验证 workspace 由独立 cleanup 事务回收，不在 promote 的即时范围内。
+    assert validation_root.is_relative_to(tmp_path / "workspace" / "runtime" / "plugin-validation")
     formal_root = current.composition_root
     await manager.terminate_all()
     assert formal_root.topology_view().listeners == ()
