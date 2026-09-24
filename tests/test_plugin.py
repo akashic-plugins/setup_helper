@@ -13,7 +13,7 @@ from agent.plugin_composition import (
     Context,
     PluginRuntime,
 )
-from plugins.commands.registry import PluginCommands
+from plugins.commands import plugin as commands_plugin
 from agent.plugins.manager import PluginManager
 from agent.plugins.selection import PluginSelection
 from agent.plugins.artifacts import ArtifactPointer, write_pointers
@@ -33,8 +33,16 @@ from plugin import (
 @pytest.mark.asyncio
 async def test_v3_apply_registers_chatid_command(tmp_path: Path) -> None:
     root = CompositionRoot("setup-helper-v3")
-    commands = PluginCommands(root.context)
-    _ = await root.context.provide(COMMANDS, commands)
+    await root.mount(
+        commands_plugin.apply,
+        name="commands",
+        runtime=PluginRuntime(
+            plugin_id="commands", generation_id="commands:test",
+            plugin_dir=Path(commands_plugin.__file__).resolve().parent,
+            data_dir=tmp_path / "commands-data", workspace=tmp_path / "workspace",
+            config={},
+        ),
+    )
 
     async def mount_plugin(ctx: Context) -> None:
         await plugin_module.apply(ctx)
@@ -52,7 +60,7 @@ async def test_v3_apply_registers_chatid_command(tmp_path: Path) -> None:
             config=dict(Config().model_dump()),
         ),
     )
-    registry = commands.freeze()
+    registry = root.context.require(COMMANDS).freeze()
     assert registry.descriptors[0].name == "chatid"
     assert registry.descriptors[0].aliases == ("myid",)
     execution = await registry.execute(
@@ -72,7 +80,7 @@ async def test_v3_apply_registers_chatid_command(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
+async def test_manager_updates_command_catalog_on_selected_source_change(
     tmp_path: Path,
 ) -> None:
     plugin_base = tmp_path / "home" / "cache" / "lab" / "setup_helper"
@@ -115,9 +123,9 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
 
     manager.bind_endpoint_switcher(_switch_endpoints)
     await manager.load_all()
-    stable = manager.current_snapshot
-    assert stable is not None and stable.composition_root is not None
-    stable_commands = stable.composition_root.context.require(COMMANDS).freeze()
+    root = manager.live_root
+    assert root is not None
+    stable_commands = root.context.require(COMMANDS).freeze()
     first = await stable_commands.execute(
         "/chatid",
         session_key="telegram:stable",
@@ -127,18 +135,11 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
     )
     assert first is not None and "stable" in first.result.text
 
-    write_pointers(plugin_base, stable=stable_pointer, latest=latest_pointer)
+    write_pointers(plugin_base, stable=latest_pointer, latest=latest_pointer)
     result = (await manager.reconcile_changed())[0]
-    candidate = manager.ready_candidate
-    assert result["publication_state"] == "latest_ready"
-    assert candidate is not None and candidate.validation_workspace is not None
-    validation_root = candidate.validation_workspace.parent
-    result = await manager.switch_ready("setup_helper@lab")
-
-    assert result["publication_state"] == "promoted"
-    current = manager.current_snapshot
-    assert current is not None and current.composition_root is not None
-    second = await current.composition_root.context.require(
+    assert result["publication_state"] == "active"
+    assert manager.live_root is root
+    second = await root.context.require(
         COMMANDS
     ).freeze().execute(
         "/myid",
@@ -159,12 +160,9 @@ async def test_manager_rebuilds_exact_command_catalog_on_candidate_publish(
         "c2c:new",
         "qqbot:new",
     )
-    # 验证 workspace 由独立 cleanup 事务回收，不在 promote 的即时范围内。
-    assert validation_root.is_relative_to(tmp_path / "workspace" / "runtime" / "plugin-validation")
-    formal_root = current.composition_root
     await manager.terminate_all()
-    assert formal_root.topology_view().listeners == ()
-    assert formal_root.receipt().effects == ()
+    assert root.topology_view().listeners == ()
+    assert root.receipt().effects == ()
 
 
 def test_qqbot_reply_contains_allow_from_hint() -> None:
