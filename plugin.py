@@ -25,11 +25,11 @@ class Config(BaseModel):
     qqbot_data_dir: str = ""
 
 
-async def apply(ctx: Context, config: Config) -> None:
+async def apply(ctx: Context) -> None:
     """登记查询当前渠道身份的 slash command。"""
 
     # 1. 配置只决定 QQBot 提示中的目标路径，不持有渠道或 Session。
-    qqbot_config_path = _qqbot_config_path(config)
+    qqbot_config_path = _qqbot_config_path(Config.model_validate(ctx.config))
 
     async def handle_chat_id(invocation: CommandInvocation) -> CommandResult:
         chat_id = invocation.chat_id or "（未知）"
