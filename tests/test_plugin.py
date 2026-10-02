@@ -13,6 +13,7 @@ from agent.plugin_composition import (
     PluginRuntime,
 )
 from agent.plugins.manager import PluginManager
+from agent.plugins.composable import ComposablePlugin
 from plugins.commands import plugin as commands_module
 from plugins.commands.plugin import apply as apply_commands
 from tests.fixtures.plugin_workspace import initialize_plugin_workspace
@@ -94,7 +95,8 @@ async def test_manager_updates_exact_command_catalog_in_current_root(
         assert len(results) == 1
         assert manager.live_root is root
         generation = manager.generation("setup_helper")
-        assert generation is not None and generation.instance.version == "3.0.1"
+        assert generation is not None and isinstance(generation.instance, ComposablePlugin)
+        assert generation.instance.version == "3.0.1"
         registry = root.context.require(COMMANDS).freeze()
         assert len(registry.descriptors) == 1
         second = await registry.execute("/myid", session_key="qqbot:new",
