@@ -6,17 +6,12 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from agent.plugin_composition import (
-    COMMANDS,
-    CommandDefinition,
-    CommandInvocation,
-    CommandResult,
-    Context,
-)
+from agent.plugin_composition import Context
+from plugins.commands.contract import COMMANDS, CommandDefinition, CommandInvocation, CommandResult
 
 api_version = 3
 name = "setup_helper"
-version = "3.0.0"
+version = "3.0.1"
 desc = "快速查询当前会话 chat_id，用于配置 Wake 送达"
 inject = (COMMANDS,)
 
